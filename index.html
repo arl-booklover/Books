@@ -27,13 +27,15 @@ th{position:sticky;top:0;background:var(--bg)}
   <label>Current shelf (applied to every book you add)</label>
   <div class="row"><input id="shelf" list="shelves" placeholder="e.g. Living room – Shelf 2"><datalist id="shelves"></datalist></div>
   <div class="row">
-    <button id="scanBtn">📷 Scan barcode</button>
-    <button id="photoBtn" class="sec">📸 Take photo of barcode</button>
+    <button id="photoBtn">📷 Photo of barcode</button>
+    <button id="titleBtn">📖 Photo of title page</button>
+    <input type="file" id="titlePhoto" accept="image/*" capture="environment" hidden>
     <input type="file" id="photo" accept="image/*" capture="environment" hidden>
     <input id="isbn" inputmode="numeric" placeholder="or type ISBN">
     <button id="addBtn">Add</button>
   </div>
-  <video id="vid" playsinline muted></video>
+  <div class="row"><input id="q" placeholder="or search by title / author"><button id="searchBtn">Search</button></div>
+  <div id="results"></div>
   <div id="msg"></div>
 </div>
 
@@ -112,16 +114,13 @@ $("addBtn").onclick=async()=>{if(await addIsbn($("isbn").value))$("isbn").value=
 $("isbn").onkeydown=e=>{if(e.key==="Enter")$("addBtn").click()};
 $("manBtn").onclick=()=>{books.unshift({shelf:$("shelf").value.trim()});save();render()};
 
-// Scanning
-let stream=null,scanning=false,last="",lastT=0,zx=null;
+// Photo reading
 const cv=document.createElement("canvas"),cx=cv.getContext("2d",{willReadFrequently:true});
-let nativeDet=null;
+let nativeDet=null,zx=null;
 try{if("BarcodeDetector" in window)nativeDet=new BarcodeDetector({formats:["ean_13","ean_8","upc_a"]})}catch(e){try{nativeDet=new BarcodeDetector()}catch(e2){}}
-function loadZX(){
-  if(window.ZXing)return Promise.resolve();
-  return new Promise((ok,no)=>{const s=document.createElement("script");
-    s.src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js";s.onload=ok;s.onerror=no;document.head.appendChild(s)});
-}
+const loadJS=(src,test)=>window[test]?Promise.resolve():new Promise((ok,no)=>{const s=document.createElement("script");s.src=src;s.onload=ok;s.onerror=no;document.head.appendChild(s)});
+const loadZX=()=>loadJS("https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js","ZXing");
+const loadTess=()=>loadJS("https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js","Tesseract");
 function zxDecode(canvas){
   if(!window.ZXing)return null;
   try{
@@ -137,51 +136,71 @@ async function decodeCanvas(c){
   if(nativeDet){try{const r=await nativeDet.detect(c);if(r[0])return r[0].rawValue}catch(e){}}
   return zxDecode(c);
 }
-function stop(){scanning=false;if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;$("vid").style.display="none";$("scanBtn").textContent="\ud83d\udcf7 Scan barcode"}
-async function onCode(code){
-  const now=Date.now();
-  if(code===last&&now-lastT<4000)return;
-  last=code;lastT=now;
-  if(!/^(978|979)\d{10}$/.test(code)&&!/^\d{9}[\dX]$/i.test(code)){say("Read "+code+", but it isn't a book ISBN. Try the barcode starting 978/979.",true);return}
-  if(navigator.vibrate)navigator.vibrate(60);
-  await addIsbn(code);
+async function drawFile(f,mw){
+  const bmp=await createImageBitmap(f),sc=Math.min(1,mw/bmp.width);
+  cv.width=Math.round(bmp.width*sc);cv.height=Math.round(bmp.height*sc);
+  cx.drawImage(bmp,0,0,cv.width,cv.height);
 }
-async function loop(){
-  if(!scanning)return;
-  const v=$("vid");
-  if(v.videoWidth){
-    const w=Math.min(1280,v.videoWidth),h=Math.round(w*v.videoHeight/v.videoWidth);
-    cv.width=w;cv.height=h;cx.drawImage(v,0,0,w,h);
-    const c=await decodeCanvas(cv);
-    if(c)await onCode(c);
-  }
-  setTimeout(loop,250);
-}
-$("scanBtn").onclick=async()=>{
-  if(scanning){stop();return}
-  try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"},width:{ideal:1920},height:{ideal:1080}}})}
-  catch(e){say("Camera unavailable. Use the photo button or type the ISBN.",true);return}
-  const v=$("vid");v.srcObject=stream;v.style.display="block";await v.play();
-  scanning=true;$("scanBtn").textContent="\u25a0 Stop scanning";
-  say("Starting scanner\u2026");
-  loop();
-  loadZX().then(()=>{if(scanning)say("Scanning\u2026 hold the 978/979 barcode flat, about 6-8 inches away.")})
-    .catch(()=>{if(scanning)say(nativeDet?"Scanning\u2026":"Backup scanner failed to load. Check your connection or use the photo button.",!nativeDet)});
-};
+
+// Barcode photo
 $("photoBtn").onclick=()=>$("photo").click();
 $("photo").onchange=async e=>{
   const f=e.target.files[0];e.target.value="";if(!f)return;
-  stop();say("Reading photo\u2026");
+  say("Reading barcode…");
   try{await loadZX()}catch(_){}
-  let bmp;try{bmp=await createImageBitmap(f)}catch(_){say("Couldn't open that photo.",true);return}
   for(const mw of [1600,1000,2400]){
-    const sc=Math.min(1,mw/bmp.width);cv.width=Math.round(bmp.width*sc);cv.height=Math.round(bmp.height*sc);
-    cx.drawImage(bmp,0,0,cv.width,cv.height);
-    const c=await decodeCanvas(cv);
-    if(c){last="";await onCode(c);return}
+    try{await drawFile(f,mw)}catch(_){say("Couldn't open that photo.",true);return}
+    const code=await decodeCanvas(cv);
+    if(code){
+      if(!/^(978|979)\d{10}$/.test(code)&&!/^\d{9}[\dX]$/i.test(code)){say("Read "+code+", but it isn't a book ISBN. Try the barcode starting 978/979.",true);return}
+      await addIsbn(code);return;
+    }
   }
-  say("Couldn't read that photo. Get closer, keep the barcode flat and sharp, or type the ISBN.",true);
+  say("Couldn't read that barcode. Get closer, keep it flat and sharp, or use the title-page photo.",true);
 };
+
+// Title page photo (OCR) + search
+$("titleBtn").onclick=()=>$("titlePhoto").click();
+$("titlePhoto").onchange=async e=>{
+  const f=e.target.files[0];e.target.value="";if(!f)return;
+  say("Reading title page… the first time can take 20-30 seconds.");
+  try{
+    await loadTess();await drawFile(f,1600);
+    const {data}=await Tesseract.recognize(cv,"eng");
+    const lines=data.text.split("\n").map(l=>l.replace(/[^\p{L}\p{N}'&:,.\- ]/gu,"").replace(/\s+/g," ").trim()).filter(l=>l.length>2);
+    if(!lines.length){say("Couldn't find any text. Try a sharper, well-lit photo, or type the title below.",true);return}
+    $("q").value=lines.slice(0,3).join(" ");
+    say("Check the text below, fix any mistakes, then tap Search.");
+    search();
+  }catch(err){say("Couldn't read the title page (needs internet). Type the title below instead.",true)}
+};
+$("searchBtn").onclick=search;
+$("q").onkeydown=e=>{if(e.key==="Enter")search()};
+async function search(){
+  const q=$("q").value.trim(),box=$("results");
+  if(!q){return}
+  box.textContent="Searching…";
+  try{
+    const r=await fetch("https://openlibrary.org/search.json?limit=6&fields=title,subtitle,author_name,first_publish_year,publisher,number_of_pages_median,isbn&q="+encodeURIComponent(q));
+    const docs=(await r.json()).docs||[];
+    box.textContent="";
+    docs.forEach(d=>{
+      const b=document.createElement("button");b.className="sec";b.style.cssText="display:block;width:100%;text-align:left;margin-top:6px";
+      b.textContent=d.title+(d.author_name?" — "+d.author_name[0]:"")+(d.first_publish_year?" ("+d.first_publish_year+")":"");
+      b.onclick=()=>{
+        books.unshift({shelf:$("shelf").value.trim(),isbn:(d.isbn||[])[0]||"",title:d.title+(d.subtitle?": "+d.subtitle:""),
+          author:(d.author_name||[]).join(", "),publisher:(d.publisher||[])[0]||"",year:d.first_publish_year||"",
+          pages:d.number_of_pages_median||"",notes:"added by title search"});
+        save();render();box.textContent="";$("q").value="";say("✓ Added: "+d.title);
+      };
+      box.appendChild(b);
+    });
+    const m=document.createElement("button");m.className="sec";m.style.cssText="display:block;width:100%;text-align:left;margin-top:6px";
+    m.textContent=docs.length?"None of these – add what I typed as a new row":"No matches – add what I typed as a new row";
+    m.onclick=()=>{books.unshift({shelf:$("shelf").value.trim(),title:q,notes:"entered manually"});save();render();box.textContent="";$("q").value="";say("Added a row. Fill in the details in the table.")};
+    box.appendChild(m);
+  }catch(e){box.textContent="Search failed (needs internet).";}
+}
 
 // CSV
 const esc=s=>{s=String(s??"");return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s};
