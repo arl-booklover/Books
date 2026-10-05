@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bookshelf Logger</title>
+<style>
+:root{--bg:#faf8f4;--fg:#222;--card:#fff;--ac:#7a4b2a;--bd:#ddd}
+@media(prefers-color-scheme:dark){:root{--bg:#1c1a18;--fg:#eee;--card:#2a2724;--ac:#d9a066;--bd:#443f3a}}
+body{font-family:system-ui,sans-serif;background:var(--bg);color:var(--fg);margin:0;padding:12px;max-width:900px;margin:auto}
+h1{font-size:1.3rem}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:12px;margin-bottom:12px}
+input,button,select{font-size:1rem;padding:10px;border-radius:8px;border:1px solid var(--bd);background:var(--card);color:var(--fg);box-sizing:border-box}
+button{background:var(--ac);color:#fff;border:0;cursor:pointer}
+button.sec{background:transparent;color:var(--ac);border:1px solid var(--ac)}
+.row{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+.row>input{flex:1;min-width:120px}
+video{width:100%;border-radius:8px;margin-top:8px;display:none;max-height:260px;object-fit:cover}
+#msg{margin-top:8px;font-size:.9rem;min-height:1.2em}
+.tw{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:.85rem}
+td,th{border-bottom:1px solid var(--bd);padding:2px;text-align:left}
+td input{width:100%;min-width:90px;padding:6px;font-size:.85rem}
+th{position:sticky;top:0;background:var(--bg)}
+</style></head><body>
+<h1>📚 Bookshelf Logger</h1>
+
+<div class="card">
+  <label>Current shelf (applied to every book you add)</label>
+  <div class="row"><input id="shelf" list="shelves" placeholder="e.g. Living room – Shelf 2"><datalist id="shelves"></datalist></div>
+  <div class="row">
+    <button id="scanBtn">📷 Scan barcode</button>
+    <button id="photoBtn" class="sec">📸 Take photo of barcode</button>
+    <input type="file" id="photo" accept="image/*" capture="environment" hidden>
+    <input id="isbn" inputmode="numeric" placeholder="or type ISBN">
+    <button id="addBtn">Add</button>
+  </div>
+  <video id="vid" playsinline muted></video>
+  <div id="msg"></div>
+</div>
+
+<div class="card">
+  <div class="row" style="margin:0 0 8px">
+    <button id="csvBtn">⬇ Export CSV</button>
+    <button class="sec" id="impBtn">⬆ Import CSV</button>
+    <button class="sec" id="manBtn">+ Manual row</button>
+    <input type="file" id="file" accept=".csv" hidden>
+  </div>
+  <div id="count"></div>
+  <div class="tw"><table><thead><tr id="head"></tr></thead><tbody id="body"></tbody></table></div>
+</div>
+
+<script>
+const COLS=["shelf","title","author","publisher","year","pages","isbn","notes"];
+let books=[];
+try{books=JSON.parse(localStorage.getItem("books")||"[]")}catch(e){}
+const $=id=>document.getElementById(id);
+const save=()=>{try{localStorage.setItem("books",JSON.stringify(books))}catch(e){}};
+const say=(t,err)=>{$("msg").textContent=t;$("msg").style.color=err?"#c0392b":"inherit"};
+try{$("shelf").value=localStorage.getItem("shelf")||""}catch(e){}
+$("shelf").oninput=()=>{try{localStorage.setItem("shelf",$("shelf").value)}catch(e){}};
+
+function render(){
+  $("head").innerHTML=COLS.map(c=>`<th>${c}</th>`).join("")+"<th></th>";
+  $("body").innerHTML="";
+  books.forEach((b,i)=>{
+    const tr=document.createElement("tr");
+    COLS.forEach(c=>{
+      const td=document.createElement("td"),inp=document.createElement("input");
+      inp.value=b[c]||"";
+      inp.onchange=()=>{b[c]=inp.value;save();shelfList()};
+      td.appendChild(inp);tr.appendChild(td);
+    });
+    const d=document.createElement("td"),x=document.createElement("button");
+    x.textContent="✕";x.className="sec";x.style.padding="4px 8px";
+    x.onclick=()=>{if(confirm("Delete this row?")){books.splice(i,1);save();render()}};
+    d.appendChild(x);tr.appendChild(d);$("body").appendChild(tr);
+  });
+  $("count").textContent=books.length+" book"+(books.length==1?"":"s");
+  shelfList();
+}
+function shelfList(){
+  $("shelves").innerHTML=[...new Set(books.map(b=>b.shelf).filter(Boolean))].map(s=>`<option value="${s.replace(/"/g,"&quot;")}">`).join("");
+}
+
+async function lookup(isbn){
+  try{
+    const r=await fetch(`https://openlibrary.org/api/books?bibkeys=ISBN:${isbn}&format=json&jscmd=data`);
+    const j=await r.json(),d=j["ISBN:"+isbn];
+    if(d)return{title:d.title+(d.subtitle?": "+d.subtitle:""),author:(d.authors||[]).map(a=>a.name).join(", "),
+      publisher:(d.publishers||[]).map(p=>p.name).join(", "),year:(d.publish_date||"").match(/\d{4}/)?.[0]||"",pages:d.number_of_pages||""};
+  }catch(e){}
+  try{
+    const r=await fetch(`https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn}`);
+    const v=(await r.json()).items?.[0]?.volumeInfo;
+    if(v)return{title:v.title+(v.subtitle?": "+v.subtitle:""),author:(v.authors||[]).join(", "),
+      publisher:v.publisher||"",year:(v.publishedDate||"").slice(0,4),pages:v.pageCount||""};
+  }catch(e){}
+  return null;
+}
+
+async function addIsbn(raw){
+  const isbn=(raw||"").replace(/[^0-9Xx]/g,"").toUpperCase();
+  if(isbn.length!==10&&isbn.length!==13){say("That doesn't look like a valid ISBN.",true);return false}
+  if(books.some(b=>b.isbn===isbn)&&!confirm("Already in your list. Add again?"))return false;
+  say("Looking up "+isbn+"…");
+  const info=await lookup(isbn);
+  const shelf=$("shelf").value.trim();
+  if(info){books.unshift({shelf,isbn,notes:"",...info});say("✓ Added: "+info.title)}
+  else{books.unshift({shelf,isbn,title:"",author:"",publisher:"",year:"",pages:"",notes:"not found – fill in"});say("Not found online. Added a blank row to fill in.",true)}
+  save();render();return true;
+}
+$("addBtn").onclick=async()=>{if(await addIsbn($("isbn").value))$("isbn").value=""};
+$("isbn").onkeydown=e=>{if(e.key==="Enter")$("addBtn").click()};
+$("manBtn").onclick=()=>{books.unshift({shelf:$("shelf").value.trim()});save();render()};
+
+// Scanning
+let stream=null,scanning=false,last="",lastT=0,zx=null;
+const cv=document.createElement("canvas"),cx=cv.getContext("2d",{willReadFrequently:true});
+let nativeDet=null;
+try{if("BarcodeDetector" in window)nativeDet=new BarcodeDetector({formats:["ean_13","ean_8","upc_a"]})}catch(e){try{nativeDet=new BarcodeDetector()}catch(e2){}}
+function loadZX(){
+  if(window.ZXing)return Promise.resolve();
+  return new Promise((ok,no)=>{const s=document.createElement("script");
+    s.src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js";s.onload=ok;s.onerror=no;document.head.appendChild(s)});
+}
+function zxDecode(canvas){
+  if(!window.ZXing)return null;
+  try{
+    if(!zx){const h=new Map();
+      h.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,[ZXing.BarcodeFormat.EAN_13,ZXing.BarcodeFormat.EAN_8,ZXing.BarcodeFormat.UPC_A]);
+      h.set(ZXing.DecodeHintType.TRY_HARDER,true);
+      zx=new ZXing.MultiFormatReader();zx.setHints(h)}
+    const src=new ZXing.HTMLCanvasElementLuminanceSource(canvas);
+    return zx.decode(new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(src))).getText();
+  }catch(e){return null}
+}
+async function decodeCanvas(c){
+  if(nativeDet){try{const r=await nativeDet.detect(c);if(r[0])return r[0].rawValue}catch(e){}}
+  return zxDecode(c);
+}
+function stop(){scanning=false;if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;$("vid").style.display="none";$("scanBtn").textContent="\ud83d\udcf7 Scan barcode"}
+async function onCode(code){
+  const now=Date.now();
+  if(code===last&&now-lastT<4000)return;
+  last=code;lastT=now;
+  if(!/^(978|979)\d{10}$/.test(code)&&!/^\d{9}[\dX]$/i.test(code)){say("Read "+code+", but it isn't a book ISBN. Try the barcode starting 978/979.",true);return}
+  if(navigator.vibrate)navigator.vibrate(60);
+  await addIsbn(code);
+}
+async function loop(){
+  if(!scanning)return;
+  const v=$("vid");
+  if(v.videoWidth){
+    const w=Math.min(1280,v.videoWidth),h=Math.round(w*v.videoHeight/v.videoWidth);
+    cv.width=w;cv.height=h;cx.drawImage(v,0,0,w,h);
+    const c=await decodeCanvas(cv);
+    if(c)await onCode(c);
+  }
+  setTimeout(loop,250);
+}
+$("scanBtn").onclick=async()=>{
+  if(scanning){stop();return}
+  try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"},width:{ideal:1920},height:{ideal:1080}}})}
+  catch(e){say("Camera unavailable. Use the photo button or type the ISBN.",true);return}
+  const v=$("vid");v.srcObject=stream;v.style.display="block";await v.play();
+  scanning=true;$("scanBtn").textContent="\u25a0 Stop scanning";
+  say("Starting scanner\u2026");
+  loop();
+  loadZX().then(()=>{if(scanning)say("Scanning\u2026 hold the 978/979 barcode flat, about 6-8 inches away.")})
+    .catch(()=>{if(scanning)say(nativeDet?"Scanning\u2026":"Backup scanner failed to load. Check your connection or use the photo button.",!nativeDet)});
+};
+$("photoBtn").onclick=()=>$("photo").click();
+$("photo").onchange=async e=>{
+  const f=e.target.files[0];e.target.value="";if(!f)return;
+  stop();say("Reading photo\u2026");
+  try{await loadZX()}catch(_){}
+  let bmp;try{bmp=await createImageBitmap(f)}catch(_){say("Couldn't open that photo.",true);return}
+  for(const mw of [1600,1000,2400]){
+    const sc=Math.min(1,mw/bmp.width);cv.width=Math.round(bmp.width*sc);cv.height=Math.round(bmp.height*sc);
+    cx.drawImage(bmp,0,0,cv.width,cv.height);
+    const c=await decodeCanvas(cv);
+    if(c){last="";await onCode(c);return}
+  }
+  say("Couldn't read that photo. Get closer, keep the barcode flat and sharp, or type the ISBN.",true);
+};
+
+// CSV
+const esc=s=>{s=String(s??"");return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s};
+$("csvBtn").onclick=()=>{
+  const csv=[COLS.join(","),...books.map(b=>COLS.map(c=>esc(b[c])).join(","))].join("\n");
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob(["\ufeff"+csv],{type:"text/csv"}));
+  a.download="my-books.csv";a.click();
+};
+function parseCSV(t){
+  const rows=[];let r=[],f="",q=false;
+  for(let i=0;i<t.length;i++){const c=t[i];
+    if(q){if(c=='"'){if(t[i+1]=='"'){f+='"';i++}else q=false}else f+=c}
+    else if(c=='"')q=true;else if(c==",")r.push(f),f="";
+    else if(c=="\n"){r.push(f);rows.push(r);r=[];f=""}else if(c!="\r")f+=c}
+  if(f||r.length){r.push(f);rows.push(r)}return rows;
+}
+$("impBtn").onclick=()=>$("file").click();
+$("file").onchange=async e=>{
+  const f=e.target.files[0];if(!f)return;
+  const rows=parseCSV((await f.text()).replace(/^\ufeff/,""));
+  const h=rows.shift().map(x=>x.trim().toLowerCase());
+  rows.filter(r=>r.some(x=>x)).forEach(r=>{const b={};COLS.forEach(c=>{const i=h.indexOf(c);b[c]=i>=0?r[i]:""});books.push(b)});
+  save();render();say("Imported.");e.target.value="";
+};
+render();
+</script></body></html>
